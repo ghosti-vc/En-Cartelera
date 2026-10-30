@@ -32,10 +32,6 @@ function errText(e) {
   return e && (e.code || e.message) ? (e.code || "") + " " + (e.message || "") : String(e);
 }
 
-function sleep(ms) {
-  return new Promise((r) => (typeof setTimeout === "function" ? setTimeout(r, ms) : r()));
-}
-
 async function tmdb(path, params) {
   await null;
   if (typeof kino.tmdb !== "function") {
@@ -47,19 +43,9 @@ async function tmdb(path, params) {
   const key = path + "?" + JSON.stringify(p);
   const hit = memo.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.data;
-  let lastErr;
-  for (let i = 0; i < 3; i++) {
-    try {
-      const data = await kino.tmdb(path, p);
-      memo.set(key, { at: Date.now(), data });
-      return data;
-    } catch (e) {
-      lastErr = e;
-      await sleep(700 * (i + 1));
-    }
-  }
-  if (hit) return hit.data; // si falla, usa lo último bueno aunque esté vencido
-  throw lastErr;
+  const data = await kino.tmdb(path, p);
+  memo.set(key, { at: Date.now(), data });
+  return data;
 }
 
 function isoDay(offsetDays) {
@@ -128,8 +114,7 @@ async function results(path, params) {
 }
 
 // Siempre con filtro de plataforma (sin él, TMDB tarda demasiado).
-// Si la consulta combinada falla, pide plataforma por plataforma.
-async function discover(kind, providers) {
+function discover(kind, providers) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
   const params = {
@@ -140,22 +125,7 @@ async function discover(kind, providers) {
   };
   params[f + ".gte"] = isoDay(0);
   params[f + ".lte"] = isoDay(DAYS_AHEAD);
-  const path = "/discover/" + (isMovie ? "movie" : "tv");
-
-  try {
-    return await results(path, params);
-  } catch (e) {
-    const merged = [];
-    for (const id of (providers || ALL).split("|")) {
-      try {
-        const r = await results(path, Object.assign({}, params, { with_watch_providers: id }));
-        merged.push(...r);
-      } catch (_) {}
-    }
-    if (merged.length) return merged;
-    if (isMovie) return results("/movie/upcoming", { region: REGION });
-    throw e;
-  }
+  return results("/discover/" + (isMovie ? "movie" : "tv"), params);
 }
 
 function rowDefs() {
@@ -200,24 +170,26 @@ function rowDefs() {
   };
 }
 
-// Una fila a la vez para no saturar a TMDB.
 async function buildRows(defs) {
   const errs = [];
-  const ok = [];
-  for (const d of defs) {
-    try {
-      const list = await d.load();
-      if (!list.length) {
-        errs.push(d.id + ": vacia");
-        continue;
+  const rows = await Promise.all(
+    defs.map(async (d) => {
+      try {
+        const list = await d.load();
+        if (!list.length) {
+          errs.push(d.id + ": vacia");
+          return null;
+        }
+        const row = { id: d.id, title: d.title, items: list };
+        if (d.genre) row.genre = d.genre;
+        return row;
+      } catch (e) {
+        errs.push(d.id + ": " + errText(e));
+        return null;
       }
-      const row = { id: d.id, title: d.title, items: list };
-      if (d.genre) row.genre = d.genre;
-      ok.push(row);
-    } catch (e) {
-      errs.push(d.id + ": " + errText(e));
-    }
-  }
+    })
+  );
+  const ok = rows.filter(Boolean);
   if (ok.length) return ok;
   return [
     {
