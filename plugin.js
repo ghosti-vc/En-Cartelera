@@ -7,13 +7,14 @@ const DAYS_AHEAD = 120;
 const ALL = "8|1899|384|119|9|337|350|531";
 
 const PLATFORMS = {
-  netflix: { name: "Netflix", id: "8" },
-  prime: { name: "Prime Video", id: "119|9" },
-  disney: { name: "Disney+", id: "337" },
-  hbo: { name: "HBO Max", id: "1899|384" },
-  apple: { name: "Apple TV+", id: "350" },
-  paramount: { name: "Paramount+", id: "531" },
+  netflix: { name: "Netflix", id: "8", net: "213" },
+  prime: { name: "Prime Video", id: "119|9", net: "1024" },
+  disney: { name: "Disney+", id: "337", net: "2739" },
+  hbo: { name: "HBO Max", id: "1899|384", net: "49|3186" },
+  apple: { name: "Apple TV+", id: "350", net: "2552" },
+  paramount: { name: "Paramount+", id: "531", net: "4330" },
 };
+const ALL_NET = Object.values(PLATFORMS).map((p) => p.net).join("|");
 
 const MONTHS = [
   "enero", "febrero", "marzo", "abril", "mayo", "junio",
@@ -113,35 +114,60 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
-function discover(kind, providers) {
-  const isMovie = kind === "movie";
-  const f = isMovie ? "primary_release_date" : "first_air_date";
-  const params = {
-    watch_region: REGION,
-    with_watch_providers: providers || ALL,
-    with_watch_monetization_types: "flatrate",
-    sort_by: "popularity.desc",
-  };
-  params[f + ".gte"] = isoDay(0);
-  params[f + ".lte"] = isoDay(DAYS_AHEAD);
-  return results("/discover/" + (isMovie ? "movie" : "tv"), params);
+// Dos páginas en paralelo; si una falla, usa lo que haya.
+async function pages(path, params) {
+  const rs = await Promise.all(
+    [1, 2].map((page) =>
+      results(path, Object.assign({}, params, { page })).catch(() => [])
+    )
+  );
+  return rs[0].concat(rs[1]);
 }
 
-// Prueba: la misma consulta que usa Top Streaming (fechas pasadas).
-async function probePast() {
-  try {
-    const r = await results("/discover/movie", {
+// TMDB casi no tiene datos de plataforma para títulos que aún no salen,
+// así que se intenta en varios pasos hasta tener suficientes resultados.
+async function discover(kind, providers, net) {
+  const isMovie = kind === "movie";
+  const f = isMovie ? "primary_release_date" : "first_air_date";
+  const path = "/discover/" + (isMovie ? "movie" : "tv");
+  const base = { sort_by: "popularity.desc" };
+  base[f + ".gte"] = isoDay(0);
+  base[f + ".lte"] = isoDay(DAYS_AHEAD);
+
+  // 1) por proveedor, solo suscripción
+  let out = await pages(
+    path,
+    Object.assign({}, base, {
       watch_region: REGION,
-      with_watch_providers: "8",
+      with_watch_providers: providers || ALL,
       with_watch_monetization_types: "flatrate",
-      sort_by: "popularity.desc",
-      "primary_release_date.gte": isoDay(-45),
-      "primary_release_date.lte": isoDay(0),
-    });
-    return "prueba pasado: OK " + r.length;
-  } catch (e) {
-    return "prueba pasado: falla";
+    })
+  );
+
+  // 2) por proveedor, sin filtrar tipo de monetización
+  if (out.length < 8) {
+    const b = await pages(
+      path,
+      Object.assign({}, base, {
+        watch_region: REGION,
+        with_watch_providers: providers || ALL,
+      })
+    );
+    out = out.concat(b);
   }
+
+  // 3) series: por network (el canal que las produce)
+  if (!isMovie && out.length < 8) {
+    const c = await pages(path, Object.assign({}, base, { with_networks: net || ALL_NET }));
+    out = out.concat(c);
+  }
+
+  // 4) películas en la fila general: próximos estrenos de TMDB para la región
+  if (isMovie && !providers && out.length < 8) {
+    const u = await results("/movie/upcoming", { region: REGION }).catch(() => []);
+    out = out.concat(u);
+  }
+  return out;
 }
 
 function rowDefs() {
@@ -152,13 +178,13 @@ function rowDefs() {
         id: key + "-pelis",
         title: t("Próximas películas en " + p.name, "Upcoming movies on " + p.name),
         genre: "peliculas",
-        load: async () => items(await discover("movie", p.id), "movie", p.name, 20),
+        load: async () => items(await discover("movie", p.id, p.net), "movie", p.name, 20),
       },
       {
         id: key + "-series",
         title: t("Próximas series en " + p.name, "Upcoming series on " + p.name),
         genre: "series",
-        load: async () => items(await discover("tv", p.id), "series", p.name, 20),
+        load: async () => items(await discover("tv", p.id, p.net), "series", p.name, 20),
       },
     ];
   };
@@ -166,15 +192,15 @@ function rowDefs() {
     proximos: [
       {
         id: "proximas-pelis",
-        title: t("Próximas películas en plataformas", "Upcoming movies on streaming"),
+        title: t("Próximas películas", "Upcoming movies"),
         genre: "peliculas",
-        load: async () => items(await discover("movie", null), "movie", null, 20),
+        load: async () => items(await discover("movie", null, null), "movie", null, 20),
       },
       {
         id: "proximas-series",
         title: t("Próximas series en plataformas", "Upcoming series on streaming"),
         genre: "series",
-        load: async () => items(await discover("tv", null), "series", null, 20),
+        load: async () => items(await discover("tv", null, null), "series", null, 20),
       },
     ],
     netflix: platform("netflix"),
@@ -186,10 +212,10 @@ function rowDefs() {
   };
 }
 
-// Guardado en el aparato: sirve de respuesta rápida y de respaldo.
+// Guardado en el aparato: respuesta rápida y respaldo.
 async function cacheGet(id) {
   try {
-    const v = await kino.storage.get("row2:" + id);
+    const v = await kino.storage.get("row3:" + id);
     return v ? JSON.parse(v) : null;
   } catch (e) {
     return null;
@@ -204,13 +230,12 @@ async function cachePut(id, list) {
       if (c.overview) c.overview = c.overview.slice(0, 300);
       return c;
     });
-    await kino.storage.set("row2:" + id, JSON.stringify({ at: Date.now(), list: slim }));
+    await kino.storage.set("row3:" + id, JSON.stringify({ at: Date.now(), list: slim }));
   } catch (e) {}
 }
 
 async function buildRows(defs) {
   const errs = [];
-  const probe = probePast();
   const rows = await Promise.all(
     defs.map(async (d) => {
       const saved = await cacheGet(d.id);
@@ -235,12 +260,11 @@ async function buildRows(defs) {
     })
   );
   const ok = rows.filter(Boolean);
-  const probeText = await probe;
   if (ok.length) return ok;
   return [
     {
       id: "diagnostico",
-      title: ("Sin datos. " + errs.slice(0, 2).join(" | ") + " | " + probeText).slice(0, 190),
+      title: ("Sin datos. " + errs.slice(0, 3).join(" | ")).slice(0, 190),
       items: [{ id: "d1", ref: "movie:0", title: "Reintenta en unos minutos", kind: "movie" }],
     },
   ];
