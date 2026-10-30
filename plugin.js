@@ -86,6 +86,7 @@ function toItem(r, kind, platformName) {
   return item;
 }
 
+// Solo los que aún no se estrenan, ordenados por fecha.
 function items(list, kind, platformName, limit) {
   const out = [];
   const seen = new Set();
@@ -111,14 +112,11 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
+// Misma forma de petición que Top Streaming (popularidad); la fecha se ordena aquí.
 function discover(kind, providers) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
-  const params = {
-    sort_by: f + ".asc",
-    include_adult: "false",
-    page: "1",
-  };
+  const params = { sort_by: "popularity.desc" };
   params[f + ".gte"] = isoDay(0);
   params[f + ".lte"] = isoDay(DAYS_AHEAD);
   if (providers) {
@@ -171,49 +169,23 @@ function rowDefs() {
   };
 }
 
-// Memoria de lo último que cargó bien (por si TMDB responde lento después).
-async function cacheGet(id) {
-  try {
-    const v = await kino.storage.get("row:" + id);
-    return v ? JSON.parse(v) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function cachePut(id, list) {
-  try {
-    const slim = list.slice(0, 12).map((it) => {
-      const c = Object.assign({}, it);
-      delete c.backdrop;
-      if (c.overview) c.overview = c.overview.slice(0, 300);
-      return c;
-    });
-    await kino.storage.set("row:" + id, JSON.stringify(slim));
-  } catch (e) {}
-}
-
 async function buildRows(defs) {
   const errs = [];
   const rows = await Promise.all(
     defs.map(async (d) => {
-      let list = null;
       try {
-        list = await d.load();
+        const list = await d.load();
         if (!list.length) {
           errs.push(d.id + ": vacia");
-          list = null;
-        } else {
-          await cachePut(d.id, list);
+          return null;
         }
+        const row = { id: d.id, title: d.title, items: list };
+        if (d.genre) row.genre = d.genre;
+        return row;
       } catch (e) {
         errs.push(d.id + ": " + errText(e));
-        list = await cacheGet(d.id);
+        return null;
       }
-      if (!list || !list.length) return null;
-      const row = { id: d.id, title: d.title, items: list };
-      if (d.genre) row.genre = d.genre;
-      return row;
     })
   );
   const ok = rows.filter(Boolean);
@@ -221,7 +193,7 @@ async function buildRows(defs) {
   return [
     {
       id: "diagnostico",
-      title: ("Sin datos. " + (errs[0] || "")).slice(0, 190),
+      title: ("Sin datos. " + errs.slice(0, 2).join(" | ")).slice(0, 190),
       items: [{ id: "d1", ref: "movie:0", title: "Reintenta en unos minutos", kind: "movie" }],
     },
   ];
