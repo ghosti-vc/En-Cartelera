@@ -45,7 +45,10 @@ async function tmdb(path, params) {
   const key = path + "?" + JSON.stringify(p);
   const hit = memo.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.data;
-  const data = await kino.tmdb(path, p);
+  const data = await Promise.race([
+    kino.tmdb(path, p),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("tmdb lento")), 7000)),
+  ]);
   memo.set(key, { at: Date.now(), data });
   return data;
 }
@@ -114,18 +117,16 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
-// Dos páginas en paralelo; si una falla, usa lo que haya.
-async function pages(path, params) {
-  const rs = await Promise.all(
-    [1, 2].map((page) =>
-      results(path, Object.assign({}, params, { page })).catch(() => [])
-    )
-  );
-  return rs[0].concat(rs[1]);
+// Cada consulta tiene tope de tiempo y, si falla, devuelve vacío.
+function safe(p, ms) {
+  return Promise.race([
+    Promise.resolve(p).catch(() => []),
+    new Promise((res) => setTimeout(() => res([]), ms || 6000)),
+  ]);
 }
 
 // TMDB casi no tiene datos de plataforma para títulos que aún no salen,
-// así que se intenta en varios pasos hasta tener suficientes resultados.
+// así que se lanzan varias variantes EN PARALELO (una sola ronda) y se juntan.
 async function discover(kind, providers, net) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
@@ -133,41 +134,26 @@ async function discover(kind, providers, net) {
   const base = { sort_by: "popularity.desc" };
   base[f + ".gte"] = isoDay(0);
   base[f + ".lte"] = isoDay(DAYS_AHEAD);
+  const prov = providers || ALL;
 
-  // 1) por proveedor, solo suscripción
-  let out = await pages(
-    path,
-    Object.assign({}, base, {
+  const jobs = [
+    safe(results(path, Object.assign({}, base, {
       watch_region: REGION,
-      with_watch_providers: providers || ALL,
+      with_watch_providers: prov,
       with_watch_monetization_types: "flatrate",
-    })
-  );
-
-  // 2) por proveedor, sin filtrar tipo de monetización
-  if (out.length < 8) {
-    const b = await pages(
-      path,
-      Object.assign({}, base, {
-        watch_region: REGION,
-        with_watch_providers: providers || ALL,
-      })
-    );
-    out = out.concat(b);
+    }))),
+    safe(results(path, Object.assign({}, base, {
+      watch_region: REGION,
+      with_watch_providers: prov,
+    }))),
+  ];
+  if (!isMovie) {
+    jobs.push(safe(results(path, Object.assign({}, base, { with_networks: net || ALL_NET }))));
+  } else if (!providers) {
+    jobs.push(safe(results("/movie/upcoming", { region: REGION })));
   }
-
-  // 3) series: por network (el canal que las produce)
-  if (!isMovie && out.length < 8) {
-    const c = await pages(path, Object.assign({}, base, { with_networks: net || ALL_NET }));
-    out = out.concat(c);
-  }
-
-  // 4) películas en la fila general: próximos estrenos de TMDB para la región
-  if (isMovie && !providers && out.length < 8) {
-    const u = await results("/movie/upcoming", { region: REGION }).catch(() => []);
-    out = out.concat(u);
-  }
-  return out;
+  const parts = await Promise.all(jobs);
+  return [].concat.apply([], parts);
 }
 
 function rowDefs() {
