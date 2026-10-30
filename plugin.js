@@ -2,7 +2,6 @@ const IMG = "https://image.tmdb.org/t/p/";
 const LANG = "es-MX";
 const REGION = "MX";
 const TTL_MS = 10 * 60 * 1000;
-const FRESH_MS = 6 * 60 * 60 * 1000;
 const DAYS_AHEAD = 120;
 const ALL = "8|1899|384|119|9|337|350|531";
 
@@ -88,6 +87,7 @@ function toItem(r, kind, platformName) {
   return item;
 }
 
+// Solo los que aún no se estrenan, ordenados por fecha.
 function items(list, kind, platformName, limit) {
   const out = [];
   const seen = new Set();
@@ -113,6 +113,7 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
+// Siempre con filtro de plataforma (sin él, TMDB tarda demasiado).
 function discover(kind, providers) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
@@ -125,23 +126,6 @@ function discover(kind, providers) {
   params[f + ".gte"] = isoDay(0);
   params[f + ".lte"] = isoDay(DAYS_AHEAD);
   return results("/discover/" + (isMovie ? "movie" : "tv"), params);
-}
-
-// Prueba: la misma consulta que usa Top Streaming (fechas pasadas).
-async function probePast() {
-  try {
-    const r = await results("/discover/movie", {
-      watch_region: REGION,
-      with_watch_providers: "8",
-      with_watch_monetization_types: "flatrate",
-      sort_by: "popularity.desc",
-      "primary_release_date.gte": isoDay(-45),
-      "primary_release_date.lte": isoDay(0),
-    });
-    return "prueba pasado: OK " + r.length;
-  } catch (e) {
-    return "prueba pasado: falla";
-  }
 }
 
 function rowDefs() {
@@ -186,61 +170,31 @@ function rowDefs() {
   };
 }
 
-// Guardado en el aparato: sirve de respuesta rápida y de respaldo.
-async function cacheGet(id) {
-  try {
-    const v = await kino.storage.get("row2:" + id);
-    return v ? JSON.parse(v) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function cachePut(id, list) {
-  try {
-    const slim = list.slice(0, 15).map((it) => {
-      const c = Object.assign({}, it);
-      delete c.backdrop;
-      if (c.overview) c.overview = c.overview.slice(0, 300);
-      return c;
-    });
-    await kino.storage.set("row2:" + id, JSON.stringify({ at: Date.now(), list: slim }));
-  } catch (e) {}
-}
-
 async function buildRows(defs) {
   const errs = [];
-  const probe = probePast();
   const rows = await Promise.all(
     defs.map(async (d) => {
-      const saved = await cacheGet(d.id);
-      if (saved && saved.list && saved.list.length && Date.now() - saved.at < FRESH_MS) {
-        return { id: d.id, title: d.title, genre: d.genre, items: saved.list };
-      }
-      let list = null;
       try {
-        list = await d.load();
+        const list = await d.load();
         if (!list.length) {
           errs.push(d.id + ": vacia");
-          list = null;
-        } else {
-          await cachePut(d.id, list);
+          return null;
         }
+        const row = { id: d.id, title: d.title, items: list };
+        if (d.genre) row.genre = d.genre;
+        return row;
       } catch (e) {
         errs.push(d.id + ": " + errText(e));
-        list = saved && saved.list ? saved.list : null;
+        return null;
       }
-      if (!list || !list.length) return null;
-      return { id: d.id, title: d.title, genre: d.genre, items: list };
     })
   );
   const ok = rows.filter(Boolean);
-  const probeText = await probe;
   if (ok.length) return ok;
   return [
     {
       id: "diagnostico",
-      title: ("Sin datos. " + errs.slice(0, 2).join(" | ") + " | " + probeText).slice(0, 190),
+      title: ("Sin datos. " + errs.slice(0, 2).join(" | ")).slice(0, 190),
       items: [{ id: "d1", ref: "movie:0", title: "Reintenta en unos minutos", kind: "movie" }],
     },
   ];
