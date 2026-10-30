@@ -47,7 +47,7 @@ async function tmdb(path, params) {
   if (hit && Date.now() - hit.at < TTL_MS) return hit.data;
   const data = await Promise.race([
     kino.tmdb(path, p),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("tmdb lento")), 7000)),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("tmdb lento")), 5000)),
   ]);
   memo.set(key, { at: Date.now(), data });
   return data;
@@ -121,12 +121,12 @@ async function results(path, params) {
 function safe(p, ms) {
   return Promise.race([
     Promise.resolve(p).catch(() => []),
-    new Promise((res) => setTimeout(() => res([]), ms || 6000)),
+    new Promise((res) => setTimeout(() => res([]), ms || 4000)),
   ]);
 }
 
-// TMDB casi no tiene datos de plataforma para títulos que aún no salen,
-// así que se lanzan varias variantes EN PARALELO (una sola ronda) y se juntan.
+// Pocas llamadas por fila (TMDB casi no tiene datos de plataforma
+// para títulos futuros, por eso las series usan también el network).
 async function discover(kind, providers, net) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
@@ -134,17 +134,12 @@ async function discover(kind, providers, net) {
   const base = { sort_by: "popularity.desc" };
   base[f + ".gte"] = isoDay(0);
   base[f + ".lte"] = isoDay(DAYS_AHEAD);
-  const prov = providers || ALL;
 
   const jobs = [
     safe(results(path, Object.assign({}, base, {
       watch_region: REGION,
-      with_watch_providers: prov,
+      with_watch_providers: providers || ALL,
       with_watch_monetization_types: "flatrate",
-    }))),
-    safe(results(path, Object.assign({}, base, {
-      watch_region: REGION,
-      with_watch_providers: prov,
     }))),
   ];
   if (!isMovie) {
@@ -220,37 +215,46 @@ async function cachePut(id, list) {
   } catch (e) {}
 }
 
+const DEADLINE_MS = 4500;
+
 async function buildRows(defs) {
   const errs = [];
-  const rows = await Promise.all(
-    defs.map(async (d) => {
-      const saved = await cacheGet(d.id);
-      if (saved && saved.list && saved.list.length && Date.now() - saved.at < FRESH_MS) {
-        return { id: d.id, title: d.title, genre: d.genre, items: saved.list };
+  const slots = new Array(defs.length).fill(null);
+
+  const jobs = defs.map(async (d, i) => {
+    const saved = await cacheGet(d.id);
+    const hasSaved = saved && saved.list && saved.list.length;
+    const asRow = (list) => ({ id: d.id, title: d.title, genre: d.genre, items: list });
+    if (hasSaved) slots[i] = asRow(saved.list); // respuesta inmediata (aunque sea vieja)
+    if (hasSaved && Date.now() - saved.at < FRESH_MS) return;
+    try {
+      const list = await d.load();
+      if (list.length) {
+        slots[i] = asRow(list);
+        await cachePut(d.id, list);
+      } else {
+        errs.push(d.id + ": vacia");
       }
-      let list = null;
-      try {
-        list = await d.load();
-        if (!list.length) {
-          errs.push(d.id + ": vacia");
-          list = null;
-        } else {
-          await cachePut(d.id, list);
-        }
-      } catch (e) {
-        errs.push(d.id + ": " + errText(e));
-        list = saved && saved.list ? saved.list : null;
-      }
-      if (!list || !list.length) return null;
-      return { id: d.id, title: d.title, genre: d.genre, items: list };
-    })
-  );
-  const ok = rows.filter(Boolean);
+    } catch (e) {
+      errs.push(d.id + ": " + errText(e));
+    }
+  });
+
+  // Si algo tarda de más, se devuelve lo que ya haya y el resto sigue
+  // cargándose en segundo plano para la próxima vez.
+  await Promise.race([
+    Promise.all(jobs),
+    new Promise((res) => setTimeout(res, DEADLINE_MS)),
+  ]);
+
+  const ok = slots.filter(Boolean);
   if (ok.length) return ok;
   return [
     {
       id: "diagnostico",
-      title: ("Sin datos. " + errs.slice(0, 3).join(" | ")).slice(0, 190),
+      title: (errs.length
+        ? "Sin datos. " + errs.slice(0, 3).join(" | ")
+        : "Cargando… pulsa Reintentar en unos segundos").slice(0, 190),
       items: [{ id: "d1", ref: "movie:0", title: "Reintenta en unos minutos", kind: "movie" }],
     },
   ];
