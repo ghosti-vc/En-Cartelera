@@ -111,10 +111,6 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
-function upcomingMovies() {
-  return results("/movie/upcoming", { region: REGION, page: "1" });
-}
-
 function discover(kind, providers) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
@@ -155,9 +151,9 @@ function rowDefs() {
     proximos: [
       {
         id: "cines",
-        title: t("Próximos estrenos en cines", "Upcoming in theaters"),
+        title: t("Próximos estrenos de películas", "Upcoming movies"),
         genre: "peliculas",
-        load: async () => items(await upcomingMovies(), "movie", null, 20),
+        load: async () => items(await discover("movie", null), "movie", null, 20),
       },
       {
         id: "series-proximas",
@@ -175,23 +171,49 @@ function rowDefs() {
   };
 }
 
+// Memoria de lo último que cargó bien (por si TMDB responde lento después).
+async function cacheGet(id) {
+  try {
+    const v = await kino.storage.get("row:" + id);
+    return v ? JSON.parse(v) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function cachePut(id, list) {
+  try {
+    const slim = list.slice(0, 12).map((it) => {
+      const c = Object.assign({}, it);
+      delete c.backdrop;
+      if (c.overview) c.overview = c.overview.slice(0, 300);
+      return c;
+    });
+    await kino.storage.set("row:" + id, JSON.stringify(slim));
+  } catch (e) {}
+}
+
 async function buildRows(defs) {
   const errs = [];
   const rows = await Promise.all(
     defs.map(async (d) => {
+      let list = null;
       try {
-        const list = await d.load();
+        list = await d.load();
         if (!list.length) {
           errs.push(d.id + ": vacia");
-          return null;
+          list = null;
+        } else {
+          await cachePut(d.id, list);
         }
-        const row = { id: d.id, title: d.title, items: list };
-        if (d.genre) row.genre = d.genre;
-        return row;
       } catch (e) {
         errs.push(d.id + ": " + errText(e));
-        return null;
+        list = await cacheGet(d.id);
       }
+      if (!list || !list.length) return null;
+      const row = { id: d.id, title: d.title, items: list };
+      if (d.genre) row.genre = d.genre;
+      return row;
     })
   );
   const ok = rows.filter(Boolean);
@@ -207,7 +229,7 @@ async function buildRows(defs) {
 
 export async function home() {
   const all = rowDefs();
-  return buildRows([].concat(all.proximos, all.netflix, all.prime));
+  return buildRows(all.proximos);
 }
 
 export async function section({ tab }) {
