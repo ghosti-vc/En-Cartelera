@@ -3,6 +3,7 @@ const LANG = "es-MX";
 const REGION = "MX";
 const TTL_MS = 10 * 60 * 1000;
 const DAYS_AHEAD = 120;
+const ALL = "8|1899|384|119|9|337|350|531";
 
 const PLATFORMS = {
   netflix: { name: "Netflix", id: "8" },
@@ -112,18 +113,18 @@ async function results(path, params) {
   return Array.isArray(d) ? d : d && Array.isArray(d.results) ? d.results : [];
 }
 
-// Misma forma de petición que Top Streaming (popularidad); la fecha se ordena aquí.
+// Siempre con filtro de plataforma (sin él, TMDB tarda demasiado).
 function discover(kind, providers) {
   const isMovie = kind === "movie";
   const f = isMovie ? "primary_release_date" : "first_air_date";
-  const params = { sort_by: "popularity.desc" };
+  const params = {
+    watch_region: REGION,
+    with_watch_providers: providers || ALL,
+    with_watch_monetization_types: "flatrate",
+    sort_by: "popularity.desc",
+  };
   params[f + ".gte"] = isoDay(0);
   params[f + ".lte"] = isoDay(DAYS_AHEAD);
-  if (providers) {
-    params.watch_region = REGION;
-    params.with_watch_providers = providers;
-    params.with_watch_monetization_types = "flatrate";
-  }
   return results("/discover/" + (isMovie ? "movie" : "tv"), params);
 }
 
@@ -148,14 +149,14 @@ function rowDefs() {
   return {
     proximos: [
       {
-        id: "cines",
-        title: t("Próximos estrenos de películas", "Upcoming movies"),
+        id: "proximas-pelis",
+        title: t("Próximas películas en plataformas", "Upcoming movies on streaming"),
         genre: "peliculas",
         load: async () => items(await discover("movie", null), "movie", null, 20),
       },
       {
-        id: "series-proximas",
-        title: t("Próximas series", "Upcoming series"),
+        id: "proximas-series",
+        title: t("Próximas series en plataformas", "Upcoming series on streaming"),
         genre: "series",
         load: async () => items(await discover("tv", null), "series", null, 20),
       },
