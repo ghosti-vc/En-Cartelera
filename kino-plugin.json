@@ -1,12 +1,12 @@
 {
   "id": "cartelera-estrenos",
   "name": "Cartelera de estrenos",
-  "version": "0.1.12",
+  "version": "0.1.15",
   "apiVersion": 8,
   "entry": "plugin.js",
   "description": "Próximos estrenos de streaming con su fecha y plataforma. Solo catálogo.",
   "hosts": ["image.tmdb.org"],
-  "capabilities": ["home", "section", "episodes", "resolve"],
+  "capabilities": ["home", "episodes", "resolve"],
   "catalogOnly": true,
   "section": { "label": "Cartelera" }
 }
